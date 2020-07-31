@@ -9,3 +9,7 @@ description = "db migration tool"
 
 [dependencies]
 clap = "^2.33"
+thiserror = "^1"
+tokio-postgres = "^0.5"
+tokio = { version = "^0.2", features = ["macros"] }
+sha1 = "^0.6"
