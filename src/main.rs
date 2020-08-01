@@ -2,9 +2,11 @@
 extern crate clap;
 
 mod error;
+mod file_entry;
 
 use clap::{Arg};
 use error::SystemError;
+use file_entry::FileEntry;
 use tokio_postgres::{Client, NoTls};
 use std::{
     fs::File,
@@ -27,66 +29,10 @@ async fn create_table(
             ,PRIMARY KEY (patch_name)
         );
     "#;
-    apply(client, sql).await?;
-    Ok(())
-}
-
-fn add(
-    patch_name: &str,
-    sha1_code: &str,
-) -> String {
-    format!(r#"
-    INSERT INTO public.migration_patches (
-        patch_name
-        ,sha1_code
-        ,created_at
-        ,updated_at
-    ) VALUES (
-        '{}'
-        ,'{}'
-        ,NOW()
-        ,NOW()
-    )
-    ON CONFLICT (patch_name) DO UPDATE SET
-        sha1_code = EXCLUDED.sha1_code
-        ,updated_at = EXCLUDED.updated_at;
-
-"#, patch_name, sha1_code)
-}
-
-async fn apply(
-    client: &Client,
-    sql: &str
-) -> Result<u64, SystemError> {
     client
         .execute(sql, &[])
-        .await.map_err(|err| err.into())
-}
-
-async fn is_exists(
-    client: &Client,
-    sha1_flag: bool,
-    file_name: &str,
-    next_sha1_code: &str,
-) -> Result<bool, SystemError> {
-    let sql = r#"
-        SELECT
-            t1.sha1_code
-        FROM
-            public.migration_patches AS t1
-        WHERE
-            t1.patch_name = $1
-    "#;
-    let rows = client
-        .query(sql, &[&file_name])
         .await?;
-    if rows.len() == 0 {
-        return Ok(false);
-    } else if !sha1_flag {
-        return Ok(true);
-    }
-    let sha1_code: &str = rows[0].get(0);
-    Ok(next_sha1_code == sha1_code)
+    Ok(())
 }
 
 async fn execute_dir(client: &Client, dir: &str, sha1_flag: bool, patch_file: &mut BufWriter<File>) -> Result<(), SystemError> {
@@ -94,23 +40,13 @@ async fn execute_dir(client: &Client, dir: &str, sha1_flag: bool, patch_file: &m
     let mut list = vec![];
     for entry in entries {
         let entry = entry?;
-        let file_name = match entry.file_name().into_string() {
-            Ok(str) => str,
-            Err(_) => return Err(SystemError::Other("file_name convert error".to_owned()))
-        };
-        let mut file = BufReader::new(std::fs::File::open(entry.path())?);
-        let mut s = String::new();
-        let _ = file.read_to_string(&mut s)?;
-        let sha = sha1::Sha1::from(&s).digest().to_string();
-        list.push((file_name, sha, s));
+        list.push(FileEntry::new(&entry)?);
     }
-    list.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    list.sort();
     for entry in list {
-        if !is_exists(client, sha1_flag, &entry.0, &entry.1).await? {
-            println!("{}", entry.0);
-            patch_file.write(&entry.2.as_bytes())?;
-            patch_file.write("\n\n".as_bytes())?;
-            patch_file.write(&add(&entry.0, &entry.1).as_bytes())?;
+        if !entry.is_exists(client, sha1_flag).await? {
+            println!("{}", entry.file_name);
+            entry.write(patch_file)?;
         }
     }
     Ok(())
