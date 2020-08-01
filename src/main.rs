@@ -141,6 +141,9 @@ async fn main() {
     let url = matches.value_of("url").unwrap();
     match execute(url, dirs, sha1_flag, init_flag, dry_flag).await {
         Ok(_) => {},
-        Err(err) => println!("{:?}", err),
+        Err(err) => {
+            eprintln!("{:?}", err);
+            std::process::exit(1);
+        },
     }
 }
