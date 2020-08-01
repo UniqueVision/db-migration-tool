@@ -6,9 +6,14 @@ mod error;
 use clap::{Arg};
 use error::SystemError;
 use tokio_postgres::{Client, NoTls};
-use std::io::Read;
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Write, Read},
+};
 
-// cargo run -- -u postgres://user:pass@localhost:5432/test -d ./patches
+// cargo run -- -u postgres://user:pass@localhost:5432/test -d ./patches -i -r
+
+static PATH_FILE: &str = "/tmp/patch.sql";
 
 async fn create_table(
     client: &Client,
@@ -26,32 +31,27 @@ async fn create_table(
     Ok(())
 }
 
-async fn add(
-    client: &Client,
+fn add(
     patch_name: &str,
     sha1_code: &str,
-) -> Result<(), SystemError> {
-    let sql = r#"
-        INSERT INTO public.migration_patches (
-            patch_name
-            ,sha1_code
-            ,created_at
-            ,updated_at
-        ) VALUES (
-            $1
-            ,$2
-            ,NOW()
-            ,NOW()
-        )
-        ON CONFLICT (patch_name) DO UPDATE SET
-            sha1_code = EXCLUDED.sha1_code
-            ,updated_at = EXCLUDED.updated_at
+) -> String {
+    format!(r#"
+    INSERT INTO public.migration_patches (
+        patch_name
+        ,sha1_code
+        ,created_at
+        ,updated_at
+    ) VALUES (
+        '{}'
+        ,'{}'
+        ,NOW()
+        ,NOW()
+    )
+    ON CONFLICT (patch_name) DO UPDATE SET
+        sha1_code = EXCLUDED.sha1_code
+        ,updated_at = EXCLUDED.updated_at;
 
-    "#;
-    client
-        .execute(sql, &[&patch_name, &sha1_code])
-        .await?;
-    Ok(())
+"#, patch_name, sha1_code)
 }
 
 async fn apply(
@@ -89,23 +89,40 @@ async fn is_exists(
     Ok(next_sha1_code == sha1_code)
 }
 
-async fn execute_dir(client: &Client, dir: &str, sha1_flag: bool) -> Result<(), SystemError> {
+async fn execute_dir(client: &Client, dir: &str, sha1_flag: bool, patch_file: &mut BufWriter<File>) -> Result<(), SystemError> {
     let entries = std::fs::read_dir(dir)?;
+    let mut list = vec![];
     for entry in entries {
         let entry = entry?;
         let file_name = match entry.file_name().into_string() {
             Ok(str) => str,
             Err(_) => return Err(SystemError::Other("file_name convert error".to_owned()))
         };
-        let mut file = std::fs::File::open(entry.path())?;
+        let mut file = BufReader::new(std::fs::File::open(entry.path())?);
         let mut s = String::new();
         let _ = file.read_to_string(&mut s)?;
-        let sha = sha1::Sha1::from("Hello World!").digest().to_string();
-        if !is_exists(client, sha1_flag, &file_name, &sha).await? {
-            apply(client, &s).await?;
-            add(client, &file_name, &sha).await?;
+        let sha = sha1::Sha1::from(&s).digest().to_string();
+        list.push((file_name, sha, s));
+    }
+    list.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    for entry in list {
+        if !is_exists(client, sha1_flag, &entry.0, &entry.1).await? {
+            println!("{}", entry.0);
+            patch_file.write(&entry.2.as_bytes())?;
+            patch_file.write("\n\n".as_bytes())?;
+            patch_file.write(&add(&entry.0, &entry.1).as_bytes())?;
         }
     }
+    Ok(())
+}
+
+async fn apply_all(client: &Client) -> Result<(), SystemError> {
+    let mut file = BufReader::new(std::fs::File::open(PATH_FILE)?);
+    let mut s = String::new();
+    let _ = file.read_to_string(&mut s)?;
+    client
+        .batch_execute(&s)
+        .await?;
     Ok(())
 }
 
@@ -114,6 +131,7 @@ async fn execute(
     dirs: Vec<&str>,
     sha1_flag: bool,
     init_flag: bool,
+    dry_flag: bool,
 ) -> Result<(), SystemError> {
     let (client, connection) = tokio_postgres::connect(url, NoTls).await?;
     tokio::spawn(async move {
@@ -126,8 +144,17 @@ async fn execute(
         create_table(&client).await?;
     }
 
-    for dir in dirs {
-        execute_dir(&client, dir, sha1_flag).await?;
+    {
+        let mut file = BufWriter::new(std::fs::File::create(PATH_FILE).unwrap());
+
+        for dir in dirs {
+            execute_dir(&client, dir, sha1_flag, &mut file).await?;
+        }
+
+        file.flush()?;
+    }
+    if !dry_flag {
+        apply_all(&client).await?;
     }
 
     Ok(())
@@ -161,6 +188,11 @@ async fn main() {
             .short("i")
             .long("init")
         )
+        .arg(Arg::with_name("dry_flag")
+            .help("Dry Run")
+            .short("r")
+            .long("dry_run")
+        )
         .get_matches();
 
     let dirs: Vec<_> = match matches.values_of("dirs") {
@@ -169,8 +201,9 @@ async fn main() {
     };
     let sha1_flag = matches.is_present("sha1_flag");
     let init_flag = matches.is_present("init_flag");
+    let dry_flag = matches.is_present("dry_flag");
     let url = matches.value_of("url").unwrap();
-    match execute(url, dirs, sha1_flag, init_flag).await {
+    match execute(url, dirs, sha1_flag, init_flag, dry_flag).await {
         Ok(_) => {},
         Err(err) => println!("{:?}", err),
     }
