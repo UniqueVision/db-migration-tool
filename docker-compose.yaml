@@ -1,0 +1,11 @@
+version: '3.7'
+
+services:
+  rust:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes: 
+      - .:/app
+    working_dir: /app
+    command: cargo build --release

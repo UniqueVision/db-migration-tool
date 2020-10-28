@@ -16,15 +16,16 @@ pub struct FileEntry {
 
 impl FileEntry {
     pub fn new(entry: &std::fs::DirEntry) -> Result<Self, SystemError> {
-        let file_name = match entry.file_name().into_string() {
-            Ok(str) => str,
-            Err(_) => return Err(SystemError::Other("file_name convert error".to_owned()))
+        let path = entry.path();
+        let file_name = match path.as_os_str().to_str() {
+            Some(str) => str,
+            None => return Err(SystemError::Other("file_name convert error".to_owned()))
         };
         let mut file = BufReader::new(std::fs::File::open(entry.path())?);
         let mut s = String::new();
         let _ = file.read_to_string(&mut s)?;
         Ok(FileEntry{
-            file_name: file_name,
+            file_name: file_name.to_owned(),
             sha: sha1::Sha1::from(&s).digest().to_string(),
             content: s,
         })

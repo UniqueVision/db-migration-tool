@@ -11,6 +11,7 @@ use tokio_postgres::{Client, NoTls};
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Write, Read},
+    path::Path,
 };
 
 // cargo run -- -u postgres://user:pass@localhost:5432/test -d ./patches -i -r
@@ -35,13 +36,35 @@ async fn create_table(
     Ok(())
 }
 
-async fn execute_dir(client: &Client, dir: &str, sha1_flag: bool, patch_file: &mut BufWriter<File>) -> Result<(), SystemError> {
-    let entries = std::fs::read_dir(dir)?;
+fn parse_dir(dir: &Path) -> Result<Vec<FileEntry>, SystemError> {
     let mut list = vec![];
+    let entries = std::fs::read_dir(dir)?;
     for entry in entries {
         let entry = entry?;
-        list.push(FileEntry::new(&entry)?);
+        match entry.file_type() {
+            Ok(file_type) => {
+                if file_type.is_dir() {
+                    let mut list2 = parse_dir(entry.path().as_path())?;
+                    list.append(&mut list2);
+                } else if file_type.is_file() {
+                    match entry.file_name().into_string() {
+                        Ok(res) => {
+                            if res.ends_with(".sql") {
+                                list.push(FileEntry::new(&entry)?);
+                            }
+                        },
+                        Err(_) => {},
+                    }
+                }
+            },
+            Err(_) => {},
+        }
     }
+    Ok(list)
+}
+
+async fn execute_dir(client: &Client, dir: &str, sha1_flag: bool, patch_file: &mut BufWriter<File>) -> Result<(), SystemError> {
+    let mut list = parse_dir(Path::new(dir))?;
     list.sort();
     for entry in list {
         if !entry.is_exists(client, sha1_flag).await? {
